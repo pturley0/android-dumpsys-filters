@@ -2,24 +2,30 @@
 
 This repository contains scripts that filter the output from various Android `dumpsys` commands to make them more readable.
 
+<br/>
 ## The Activity Manager
 
 You can view the state of the Activity Manager with the following command:
 
+<br/>
 ```
 adb shell dumpsys activity
 ```
+<br/>
 
 This command dumps a _lot_ of information.  Often, you only really care about the activity data structures, and you can focus the Activity Manager's output with the `[a]ctivities` argument:
 
+<br/>
 ```
 adb shell dumpsys activity activities
 ```
+<br/>
 
 Even this produces quite a lot of information, and in a format that's difficult to read.
 
 The `filter-tasks` shell script parses the output of that latter command and rearranges it to show activities in a more readable way. For example:
 
+<br/>
 ```
 $ adb shell dumpsys activity a | filter-tasks
 
@@ -44,25 +50,32 @@ Activity Manager Service Metadata
   ────────────
     [0] #1 (21a4a334) Affinity=com.android.launcher
 ```
+<br/>
 
+<br/>
 ## The Window Manager
 
 You can view the state of the Window Manager with the following command:
 
+<br/>
 ```
 adb shell dumpsys window
 ```
+<br/>
 
 This command dumps a _lot_ of information.  Often, you only really care about the window data structures, and you can focus the Window Manager's output with the `[w]indows` argument:
 
+<br/>
 ```
 adb shell dumpsys window windows
 ```
+<br/>
 
 Even this produces quite a lot of information, and in a format that's difficult to read.
 
 The `filter-windows` shell script parses the output of that latter command and rearranges it to show windows in a more readable way. For example:
 
+<br/>
 ```
 $ adb shell dumpsys window w | filter-windows
 
@@ -157,3 +170,4 @@ Window Manager Service Metadata
 
   Focused Activity: (21a5d600) com.android.launcher/com.android.launcher2.Launcher
 ```
+<br/>
