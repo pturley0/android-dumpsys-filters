@@ -1,0 +1,1040 @@
+#===============================================================================
+# This bash script post-processes an Window Manager "dump" to make it more
+# readable:
+#
+#       adb shell dumpsys window w | filter-windows
+#
+# This script also offers the following options:
+#
+#       -d  Decode layout flags to show the meaning of each bit.
+#
+#       -v  Omit details on windows that aren't visible.
+#
+#===============================================================================
+
+#===============================================================================
+# Constants.
+#===============================================================================
+
+# We use this constant to help remove carriage returns from the input.
+
+declare -r CarriageReturn=$(printf '\r')
+
+# A map that associates distinguished user IDs with their names.
+
+declare -r UIDMap=(
+    'SYSTEM_UID'    '1000'
+    'PHONE_UID'     '1001'
+    'SHELL_UID'     '2000'
+    'LOG_UID'       '1007'
+    'WIFI_UID'      '1010'
+    'MEDIA_UID'     '1013'
+    'DRM_UID'       '1019'
+    'VPN_UID'       '1016'
+    'NFC_UID'       '1027'
+    'BLUETOOTH_UID' '1002'
+    )
+
+# A map that associates layout flags with their names.
+
+declare -r LayoutFlagMap=(
+    'FLAG_ALLOW_LOCK_WHILE_SCREEN_ON'   '0x00000001'
+    'FLAG_BLUR_BEHIND'                  '0x00000004'
+    'FLAG_NOT_FOCUSABLE'                '0x00000008'
+    'FLAG_NOT_TOUCHABLE'                '0x00000010'
+    'FLAG_NOT_TOUCH_MODAL'              '0x00000020'
+    'FLAG_TOUCHABLE_WHEN_WAKING'        '0x00000040'
+    'FLAG_KEEP_SCREEN_ON'               '0x00000080'
+    'FLAG_LAYOUT_IN_SCREEN'             '0x00000100'
+    'FLAG_LAYOUT_NO_LIMITS'             '0x00000200'
+    'FLAG_FULLSCREEN'                   '0x00000400'
+    'FLAG_FORCE_NOT_FULLSCREEN'         '0x00000800'
+    'FLAG_DITHER'                       '0x00001000'
+    'FLAG_SECURE'                       '0x00002000'
+    'FLAG_SCALED'                       '0x00004000'
+    'FLAG_IGNORE_CHEEK_PRESSES'         '0x00008000'
+    'FLAG_LAYOUT_INSET_DECOR'           '0x00010000'
+    'FLAG_ALT_FOCUSABLE_IM'             '0x00020000'
+    'FLAG_WATCH_OUTSIDE_TOUCH'          '0x00040000'
+    'FLAG_SHOW_WHEN_LOCKED'             '0x00080000'
+    'FLAG_SHOW_WALLPAPER'               '0x00100000'
+    'FLAG_TURN_SCREEN_ON'               '0x00200000'
+    'FLAG_DISMISS_KEYGUARD'             '0x00400000'
+    'FLAG_SPLIT_TOUCH'                  '0x00800000'
+    'FLAG_HARDWARE_ACCELERATED'         '0x01000000'
+    'FLAG_LAYOUT_IN_OVERSCAN'           '0x02000000'
+    'FLAG_TRANSLUCENT_STATUS'           '0x04000000'
+    'FLAG_TRANSLUCENT_NAVIGATION'       '0x08000000'
+    'FLAG_LOCAL_FOCUS_MODE'             '0x10000000'
+    'FLAG_SLIPPERY'                     '0x20000000'
+    'FLAG_NEEDS_MENU_KEY'               '0x40000000'
+    )
+
+# A map that associates private layout flags with their names.
+
+declare -r LayoutPrivateFlagMap=(
+    'PRIVATE_FLAG_FAKE_HARDWARE_ACCELERATED'    '0x00000001'
+    'PRIVATE_FLAG_FORCE_HARDWARE_ACCELERATED'   '0x00000002'
+    'PRIVATE_FLAG_WANTS_OFFSET_NOTIFICATIONS'   '0x00000004'
+    'PRIVATE_FLAG_SET_NEEDS_MENU_KEY'           '0x00000008'
+    'PRIVATE_FLAG_SHOW_FOR_ALL_USERS'           '0x00000010'
+    'PRIVATE_FLAG_NO_MOVE_ANIMATION'            '0x00000040'
+    'PRIVATE_FLAG_COMPATIBLE_WINDOW'            '0x00000080'
+    'PRIVATE_FLAG_SYSTEM_ERROR'                 '0x00000100'
+    'PRIVATE_FLAG_INHERIT_TRANSLUCENT_DECOR'    '0x00000200'
+    )
+
+# A map that associates system UI visibility flags with their names.
+
+declare -r SystemUIVisibilityFlagMap=(
+    'SYSTEM_UI_FLAG_VISIBLE'                    '0'
+    'SYSTEM_UI_FLAG_LOW_PROFILE'                '0x00000001'
+    'SYSTEM_UI_FLAG_HIDE_NAVIGATION'            '0x00000002'
+    'SYSTEM_UI_FLAG_FULLSCREEN'                 '0x00000004'
+    'SYSTEM_UI_FLAG_LAYOUT_STABLE'              '0x00000100'
+    'SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION'     '0x00000200'
+    'SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN'          '0x00000400'
+    'SYSTEM_UI_FLAG_IMMERSIVE'                  '0x00000800'
+    'SYSTEM_UI_FLAG_IMMERSIVE_STICKY'           '0x00001000'
+    'STATUS_BAR_DISABLE_EXPAND'                 '0x00010000'
+    'STATUS_BAR_DISABLE_NOTIFICATION_ICONS'     '0x00020000'
+    'STATUS_BAR_DISABLE_NOTIFICATION_ALERTS'    '0x00040000'
+    'STATUS_BAR_DISABLE_NOTIFICATION_TICKER'    '0x00080000'
+    'STATUS_BAR_DISABLE_SYSTEM_INFO'            '0x00100000'
+    'STATUS_BAR_DISABLE_HOME'                   '0x00200000'
+    'STATUS_BAR_DISABLE_BACK'                   '0x00400000'
+    'STATUS_BAR_DISABLE_CLOCK'                  '0x00800000'
+    'STATUS_BAR_DISABLE_RECENT'                 '0x01000000'
+    'STATUS_BAR_DISABLE_SEARCH'                 '0x02000000'
+    'STATUS_BAR_TRANSIENT'                      '0x04000000'
+    'NAVIGATION_BAR_TRANSIENT'                  '0x08000000'
+    'STATUS_BAR_UNHIDE'                         '0x10000000'
+    'NAVIGATION_BAR_UNHIDE'                     '0x20000000'
+    'STATUS_BAR_TRANSLUCENT'                    '0x40000000'
+    'NAVIGATION_BAR_TRANSLUCENT'                '0x80000000'
+    )
+
+#===============================================================================
+# Global variables.
+#===============================================================================
+
+# Indicates whether we should decode WindowManager.LayoutParams flags.
+
+DecodeFlags='false'
+
+# Try to understand which windows are visible and, they definitely aren't, omit
+# them from the output.
+#
+# Our understanding of window visibility is imperfect, so we can only guarantee
+# that omitted windows are definitely not visible. Some of the windows that make
+# it to the output may actually not be visible.
+
+OmitNonVisibleWindows='false'
+
+# The buffer that contains the current line of input.
+
+LineBuffer=''
+
+#===============================================================================
+
+ExamineTheCommandLine()
+{
+
+    #---------------------------------------------------------------------------
+    # Loop over options.
+    #---------------------------------------------------------------------------
+
+    local arg=''
+
+    while (($# != 0))
+    do
+
+        #-----------------------------------------------------------------------
+        # Get the current argument.
+        #-----------------------------------------------------------------------
+
+        arg="$1"
+        shift
+
+        #-----------------------------------------------------------------------
+        # Try to understand it.
+        #-----------------------------------------------------------------------
+
+        case "${arg}" in
+
+            '-d')
+
+                #---------------------------------------------------------------
+                # The user wants to decode layout flags.
+                #---------------------------------------------------------------
+
+                DecodeFlags='true'
+
+                ;;
+
+            '-v')
+
+                #---------------------------------------------------------------
+                # The user wants to omit windows that aren't visible.
+                #---------------------------------------------------------------
+
+                OmitNonVisibleWindows='true'
+
+                ;;
+
+            *)
+
+                #---------------------------------------------------------------
+                # This argument doesn't make any sense.
+                #---------------------------------------------------------------
+
+                echo "Unrecognized argument: ${arg}"
+                exit 1
+
+                ;;
+
+        esac
+
+    done
+
+}
+
+#===============================================================================
+
+ThrowYourHandsInTheAir()
+    {
+
+    echo
+    echo 'Error'
+    echo
+    echo $*
+    echo
+
+    exit 1
+
+    }
+
+#===============================================================================
+
+GetTheNextLine()
+    {
+
+    #---------------------------------------------------------------------------
+    # Loop until we get a non-blank line.
+    #---------------------------------------------------------------------------
+
+    while :
+    do
+
+        #-----------------------------------------------------------------------
+        # Attempt to read the next line.
+        #-----------------------------------------------------------------------
+
+        if read -r
+        then
+            LineBuffer="${REPLY}"
+        else
+            exit 0
+        fi
+
+        #-----------------------------------------------------------------------
+        # Strip carriage-returns at the end of the line.
+        #-----------------------------------------------------------------------
+
+        LineBuffer=$(echo "${LineBuffer}" | sed -e "s/${CarriageReturn}//")
+
+        #-----------------------------------------------------------------------
+        # If this line is blank, go back for another.
+        #-----------------------------------------------------------------------
+
+        if [[ "${LineBuffer}" == '' ]]
+        then
+            continue
+        fi
+
+        #-----------------------------------------------------------------------
+        # This line is good.
+        #-----------------------------------------------------------------------
+
+        #echo ">|${LineBuffer}|<"
+
+        return
+
+    done
+
+    }
+
+#===============================================================================
+
+Underscore()
+    {
+
+    #---------------------------------------------------------------------------
+    # Get our argument.
+    #---------------------------------------------------------------------------
+
+    local Scratch="$1"
+
+    #---------------------------------------------------------------------------
+    # Get the length.
+    #---------------------------------------------------------------------------
+
+    local Length=${#Scratch}
+
+    #---------------------------------------------------------------------------
+    # Emit the argument.
+    #---------------------------------------------------------------------------
+
+    printf '%s\n' "${Scratch}"
+
+    #---------------------------------------------------------------------------
+    # Underscore it.
+    #---------------------------------------------------------------------------
+
+    local i=$((Length))
+
+    while (( i > 0 ))
+    do
+        printf '─'
+        i=$((i - 1))
+    done
+
+    printf '\n'
+
+    }
+
+#===============================================================================
+
+Parse()
+    {
+
+    #---------------------------------------------------------------------------
+    # Prime the first line of input.
+    #---------------------------------------------------------------------------
+
+    GetTheNextLine
+
+    #---------------------------------------------------------------------------
+    # Loop over nonsense until we find a window.
+    #---------------------------------------------------------------------------
+
+    while ! Window
+    do
+        GetTheNextLine
+    done
+
+    #---------------------------------------------------------------------------
+    # Loop over the remaining windows.
+    #---------------------------------------------------------------------------
+
+    while Window
+    do
+        :
+    done
+
+    #---------------------------------------------------------------------------
+    # We're done with windows. Parse the metadata.
+    #---------------------------------------------------------------------------
+
+    Metadata
+
+    #---------------------------------------------------------------------------
+    # Make some space at the end.
+    #---------------------------------------------------------------------------
+
+    echo
+
+    }
+
+#===============================================================================
+
+Metadata()
+    {
+
+    #---------------------------------------------------------------------------
+    # Announce the beginning of the metadata.
+    #---------------------------------------------------------------------------
+
+    echo
+    echo
+    Underscore 'Window Manager Service Metadata'
+    echo
+
+    #---------------------------------------------------------------------------
+    # Continue consuming lines, picking out information that interests us, until
+    # we encounter one that can't belong to this window.
+    #---------------------------------------------------------------------------
+
+    while :
+    do
+
+        #-----------------------------------------------------------------------
+        # Try to understand the current line.
+        #-----------------------------------------------------------------------
+
+        if [[ "${LineBuffer}" =~ ^.*' 'mFocusedApp=.*$ ]]
+        then
+            local FocusedActivity=$(ExtractActivityFromAppWindowToken)
+            echo "  Focused Activity    : ${FocusedActivity}"
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*' 'mLastStatusBarVisibility=.*$ ]]
+        then
+            local SystemUIVisibility=$(ExtractSystemUIVisibility 'mLastStatusBarVisibility=0x' '                        ')
+            echo "  System UI Visibility: ${SystemUIVisibility}"
+        fi
+
+        #-----------------------------------------------------------------------
+        # Consume this line.
+        #-----------------------------------------------------------------------
+
+        GetTheNextLine
+
+    done
+
+    }
+
+#===============================================================================
+
+Window()
+    {
+
+    #---------------------------------------------------------------------------
+    # Check if we're looking at a window.
+    #---------------------------------------------------------------------------
+
+    if ! [[ "${LineBuffer}" =~ ^"  Window #" ]]
+    then
+        return 1
+    fi
+
+    #---------------------------------------------------------------------------
+    # Extract the window number.
+    #---------------------------------------------------------------------------
+
+    local WindowNumber=$(echo "${LineBuffer}" | sed -e 's/^.*Window #\([0-9][0-9]*\).*$/\1/')
+
+    #---------------------------------------------------------------------------
+    # This line should contain a window state.
+    #---------------------------------------------------------------------------
+
+    local WindowState=''
+
+    if ! WindowState=$(ExtractWindowState)
+    then
+        ThrowYourHandsInTheAir Malformed window state
+    fi
+
+    #---------------------------------------------------------------------------
+    # Consume this line.
+    #---------------------------------------------------------------------------
+
+    GetTheNextLine
+
+    #---------------------------------------------------------------------------
+    # Continue consuming lines, picking out information that interests us, until
+    # we encounter one that can't belong to this window.
+    #---------------------------------------------------------------------------
+
+    while [[ "${LineBuffer}" =~ ^"    " ]]
+    do
+
+        #-----------------------------------------------------------------------
+        # Try to understand the current line.
+        #-----------------------------------------------------------------------
+
+        if [[ "${LineBuffer}" =~ ^.*' 'mOwnerUid=.*$ ]]
+        then
+            local OwnerUID=$(ExtractOwnerUID)
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*' 'package=.*$ ]]
+        then
+            local Package=$(echo "${LineBuffer}" | sed -e 's/^.* package=\([^ ][^ ]*\).*$/\1/')
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*' 'appop=.*$ ]]
+        then
+            local AppOperation=$(echo "${LineBuffer}" | sed -e 's/^.* appop=\([^ ][^ ]*\).*$/\1/')
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*' 'mAttrs=.*$ ]]
+        then
+            local Flags=$(ExtractLayoutFlags)
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*' 'mBaseLayer=.*$ ]]
+        then
+            local BaseLayer=$(echo "${LineBuffer}" | sed -e 's/^.* mBaseLayer=\([0-9][0-9]*\).*$/\1/')
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*' 'mAppToken=.*$ ]]
+        then
+            local Activity=$(ExtractActivityFromAppWindowToken)
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*' 'mTargetAppToken=.*$ ]]
+        then
+            local TargetActivity=$(ExtractActivityFromAppWindowToken)
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*' 'mViewVisibility=.*$ ]]
+        then
+            local ViewVisibility=$(echo "${LineBuffer}" | sed -e 's/^.* mViewVisibility=0x\([0-9][0-9]*\).*$/\1/')
+            case "${ViewVisibility}" in
+                0)
+                    ViewVisibility='Visible'
+                    ;;
+                4)
+                    ViewVisibility='Invisible'
+                    ;;
+                8)
+                    ViewVisibility='Gone'
+                    ;;
+            esac
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*' 'mObscured=.*$ ]]
+        then
+            local Obscured=$(echo "${LineBuffer}" | sed -e 's/^.* mObscured=\([^ ][^ ]*\).*$/\1/')
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*'        'content=\[.*$ ]]
+        then
+            local ContentFrame=$(echo "${LineBuffer}" | sed -e 's/^.* content=\([^ ][^ ]*\).*$/\1/')
+            local VisibleFrame=$(echo "${LineBuffer}" | sed -e 's/^.* visible=\([^ ][^ ]*\).*$/\1/')
+        fi
+
+        if [[ "${LineBuffer}" =~ ^.*' 'mSystemUiVisibility=.*$ ]]
+        then
+            local SystemUIVisibility=$(ExtractSystemUIVisibility ' mSystemUiVisibility=0x' '                        ')
+        fi
+
+        #-----------------------------------------------------------------------
+        # Consume this line.
+        #-----------------------------------------------------------------------
+
+        GetTheNextLine
+
+    done
+
+    #---------------------------------------------------------------------------
+    # Decide whether we think this window is not visible.
+    #---------------------------------------------------------------------------
+
+    # Begin by assuming this window is visible.
+
+    local ThisWindowIsVisible='true'
+
+    # Check if the root view within this window is visible.
+
+    if [[ "${ViewVisibility}" != 'Visible' ]]
+    then
+        ThisWindowIsVisible='false'
+    fi
+
+    # Check if this window has been marked as obscured.
+
+    if [[ "${Obscured}" != 'false' ]]
+    then
+        ThisWindowIsVisible='false'
+    fi
+
+    #---------------------------------------------------------------------------
+    # Check if we're supposed to omit windows that aren't visible.
+    #---------------------------------------------------------------------------
+
+    if [[ "${OmitNonVisibleWindows}" == 'true' && "${ThisWindowIsVisible}" != 'true' ]]
+    then
+
+        #-----------------------------------------------------------------------
+        # If control arrives here, we're supposed to omit non-visible windows,
+        # and this window is definitely not visible.
+        #
+        # Return immediately, without producing any output.
+        #-----------------------------------------------------------------------
+
+        return
+
+    fi
+
+    #---------------------------------------------------------------------------
+    # Dump what we've learned.
+    #---------------------------------------------------------------------------
+
+    echo
+    echo
+    Underscore "Window #${WindowNumber} ${WindowState}"
+
+    echo "  Owner's UID         : ${OwnerUID}"
+    echo "  Package             : ${Package}"
+    echo "  App Operation       : ${AppOperation}"
+    echo "  Base Layer          : ${BaseLayer}"
+
+    if [[ -n "${Activity}" ]]
+    then
+        echo "  Activity            : ${Activity}"
+    fi
+
+    if [[ -n "${TargetActivity}" ]]
+    then
+        echo "  Target Activity     : ${TargetActivity}"
+    fi
+    echo "  View Visibility     : ${ViewVisibility}"
+    echo "  Obscured            : ${Obscured}"
+    echo "  Frames              : Content: ${ContentFrame}  Visible: ${VisibleFrame}"
+
+    echo "${Flags}"
+    echo "  System UI Visibility: ${SystemUIVisibility}"
+
+    #---------------------------------------------------------------------------
+    # Return success.
+    #---------------------------------------------------------------------------
+
+    return 0
+
+    }
+
+#===============================================================================
+
+ExtractOwnerUID()
+    {
+
+    #---------------------------------------------------------------------------
+    # Check if the current line appears to contain an owner UID.
+    #---------------------------------------------------------------------------
+
+    if ! [[ "${LineBuffer}" =~ ^.*" mOwnerUid=" ]]
+    then
+        return 1
+    fi
+
+    #---------------------------------------------------------------------------
+    # Get the hexadecimal representation of the flags.
+    #---------------------------------------------------------------------------
+
+    local UserID=$(
+        echo "${LineBuffer}" |
+        sed -e 's/^.* mOwnerUid=\([0-9][0-9]*\).*$/\1/'
+        )
+
+    #---------------------------------------------------------------------------
+    # Check if this is a distinguished UID.
+    #---------------------------------------------------------------------------
+
+    local UIDName=''
+
+    i=0
+    while (( i < ( ${#UIDMap[@]} / 2 ) ))
+    do
+
+        #-----------------------------------------------------------------------
+        # Extract the current UID name and value.
+        #-----------------------------------------------------------------------
+
+        local Name="${UIDMap[((2 * i + 0))]}"
+        local Value="${UIDMap[((2 * i + 1))]}"
+
+        #-----------------------------------------------------------------------
+        # Check if this is a match.
+        #-----------------------------------------------------------------------
+
+        if ((UserID == Value))
+        then
+            UIDName=" ${Name}"
+        fi
+
+        #-----------------------------------------------------------------------
+        # Prepare for the next iteration.
+        #-----------------------------------------------------------------------
+
+        i=$((i + 1))
+
+    done
+
+    #---------------------------------------------------------------------------
+    # Return the result.
+    #---------------------------------------------------------------------------
+
+    echo "${UserID}${UIDName}"
+
+    #---------------------------------------------------------------------------
+    # Return success.
+    #---------------------------------------------------------------------------
+
+    return 0
+
+    }
+
+#===============================================================================
+
+ExtractWindowState()
+    {
+
+    #---------------------------------------------------------------------------
+    # Check if the current line appears to contain a window state.
+    #---------------------------------------------------------------------------
+
+    if ! [[ "${LineBuffer}" =~ ^.*"Window{" ]]
+    then
+        return 1
+    fi
+
+    #---------------------------------------------------------------------------
+    # Extract information.
+    #---------------------------------------------------------------------------
+
+    local HashCode=$(
+        echo "${LineBuffer}" |
+        sed -e 's/^.*Window[^ ]\([^ ][^ ]*\) .*$/\1/'
+        )
+
+    local UserID=$(
+        echo "${LineBuffer}" |
+        sed -e 's/^.*Window[^ ][^ ][^ ]* u\([^ ][^ ]*\).*$/\1/'
+        )
+
+    local Title=$(
+        echo "${LineBuffer}" |
+        sed -e 's/^.*Window[^ ][^ ][^ ]* u[^ ][^ ]* \([^}][^}]*\).*$/\1/'
+        )
+
+    #---------------------------------------------------------------------------
+    # Describe this window state.
+    #---------------------------------------------------------------------------
+
+    echo "(${HashCode}) ${Title}"
+
+    #---------------------------------------------------------------------------
+    # Return success.
+    #---------------------------------------------------------------------------
+
+    return 0
+
+    }
+
+#===============================================================================
+
+ExtractLayoutFlags()
+    {
+
+    #---------------------------------------------------------------------------
+    # Set our indentation.
+    #---------------------------------------------------------------------------
+
+    local Indentation='                        '
+
+    #---------------------------------------------------------------------------
+    # Check if the current line appears to contain layout flags.
+    #---------------------------------------------------------------------------
+
+    if ! [[ "${LineBuffer}" =~ ^.*"fl=#" ]]
+    then
+        return 1
+    fi
+
+    #---------------------------------------------------------------------------
+    # Get the hexadecimal representation of the flag set.
+    #---------------------------------------------------------------------------
+
+    local Flags=$(
+        echo "${LineBuffer}" |
+        sed -e 's/^.*fl=#\([0-9a-f][0-9a-f]*\).*$/\1/'
+        )
+
+    Flags="0x${Flags}"
+
+    #---------------------------------------------------------------------------
+    # Get the hexadecimal representation of the private flag set, if it exists.
+    #---------------------------------------------------------------------------
+
+    local PrivateFlags=0
+
+    if [[ "${LineBuffer}" =~ ^.*"pfl=0x" ]]
+    then
+        local PrivateFlags=$(
+            echo "${LineBuffer}" |
+            sed -e 's/^.*pfl=0x\([0-9a-f][0-9a-f]*\).*$/\1/'
+            )
+    fi
+
+    PrivateFlags="0x${PrivateFlags}"
+
+    #---------------------------------------------------------------------------
+    # Comprehend the flags.
+    #---------------------------------------------------------------------------
+
+    local FlagsDescription="  Flags               : ${Flags}"
+
+    if [[ "${DecodeFlags}" == 'true' ]]
+    then
+
+        i=0
+        while (( i < ( ${#LayoutFlagMap[@]} / 2 ) ))
+        do
+
+            #-------------------------------------------------------------------
+            # Extract the current flag name and value.
+            #-------------------------------------------------------------------
+
+            local Name="${LayoutFlagMap[((2 * i + 0))]}"
+            local Value="${LayoutFlagMap[((2 * i + 1))]}"
+
+            #-------------------------------------------------------------------
+            # Check if this flag is set.
+            #-------------------------------------------------------------------
+
+            if ((Flags & Value))
+            then
+                FlagsDescription+=$'\n'"${Indentation}${Name}"
+            fi
+
+            #-------------------------------------------------------------------
+            # Prepare for the next iteration.
+            #-------------------------------------------------------------------
+
+            i=$((i + 1))
+
+        done
+
+    fi
+
+    #---------------------------------------------------------------------------
+    # Comprehend the private flags.
+    #---------------------------------------------------------------------------
+
+    local PrivateFlagsDescription="  Private Flags       : ${PrivateFlags}"
+
+    if [[ "${DecodeFlags}" == 'true' ]]
+    then
+
+        i=0
+        while (( i < ( ${#LayoutPrivateFlagMap[@]} / 2 ) ))
+        do
+
+            #-------------------------------------------------------------------
+            # Extract the current flag name and value.
+            #-------------------------------------------------------------------
+
+            local Name="${LayoutPrivateFlagMap[((2 * i + 0))]}"
+            local Value="${LayoutPrivateFlagMap[((2 * i + 1))]}"
+
+            #-------------------------------------------------------------------
+            # Check if this flag is set.
+            #-------------------------------------------------------------------
+
+            if ((PrivateFlags & Value))
+            then
+                PrivateFlagsDescription+=$'\n'"${Indentation}${Name}"
+            fi
+
+            #-------------------------------------------------------------------
+            # Prepare for the next iteration.
+            #-------------------------------------------------------------------
+
+            i=$((i + 1))
+
+        done
+
+    fi
+
+    #---------------------------------------------------------------------------
+    # Compute the final result.
+    #---------------------------------------------------------------------------
+
+    LayoutFlags="${FlagsDescription}"$'\n'"${PrivateFlagsDescription}"
+
+    #---------------------------------------------------------------------------
+    # Return the result.
+    #---------------------------------------------------------------------------
+
+    echo "${LayoutFlags}"
+
+    #---------------------------------------------------------------------------
+    # Return success.
+    #---------------------------------------------------------------------------
+
+    return 0
+
+    }
+
+#===============================================================================
+
+ExtractActivityFromAppWindowToken()
+    {
+
+    #---------------------------------------------------------------------------
+    # Check if this line appears to contain an app window token.
+    #---------------------------------------------------------------------------
+
+    if ! [[ "${LineBuffer}" =~ ^.*"AppWindowToken{" ]]
+    then
+        return 1
+    fi
+
+    #---------------------------------------------------------------------------
+    # Extract information.
+    #---------------------------------------------------------------------------
+
+    local ActivityRecord=$(ExtractActivityRecord "${LineBuffer}")
+
+    #---------------------------------------------------------------------------
+    # Describe this window token.
+    #---------------------------------------------------------------------------
+
+    echo "${ActivityRecord}"
+
+    #---------------------------------------------------------------------------
+    # Return success.
+    #---------------------------------------------------------------------------
+
+    return 0
+
+    }
+
+#===============================================================================
+
+ExtractActivityRecord()
+    {
+
+    #---------------------------------------------------------------------------
+    # Get our argument.
+    #---------------------------------------------------------------------------
+
+    local LineBuffer="$1"
+
+    #---------------------------------------------------------------------------
+    # Check if the current line appears to contain an activity record.
+    #---------------------------------------------------------------------------
+
+    if ! [[ "${LineBuffer}" =~ ^.*"ActivityRecord{" ]]
+    then
+        return 1
+    fi
+
+    #---------------------------------------------------------------------------
+    # Extract information about this activity.
+    #---------------------------------------------------------------------------
+
+    local HashCode=$(
+        echo "${LineBuffer}" |
+        sed -e 's/^.*ActivityRecord{\([^ ][^ ]*\) .*$/\1/'
+        )
+
+    local ComponentName=$(
+        echo "${LineBuffer}" |
+        sed -e 's/^.*ActivityRecord{[^ ]* [^ ][^ ]* \([^ ][^ ]*\) .*$/\1/'
+        )
+
+    #---------------------------------------------------------------------------
+    # Describe this activity.
+    #---------------------------------------------------------------------------
+
+    echo "(${HashCode}) ${ComponentName}"
+
+    #---------------------------------------------------------------------------
+    # Return success.
+    #---------------------------------------------------------------------------
+
+    return 0
+
+    }
+
+#===============================================================================
+
+ExtractSystemUIVisibility()
+    {
+
+    #---------------------------------------------------------------------------
+    # Get our arguments.
+    #---------------------------------------------------------------------------
+
+    local Key="$1"
+    local Indentation="$2"
+
+    #---------------------------------------------------------------------------
+    # Check if the current line appears to contain system UI visibility flags.
+    #---------------------------------------------------------------------------
+
+    if ! [[ "${LineBuffer}" =~ ^.*"${Key}" ]]
+    then
+        return 1
+    fi
+
+    #---------------------------------------------------------------------------
+    # Get the hexadecimal representation of the flags.
+    #---------------------------------------------------------------------------
+
+    local Flags=$(
+        echo "${LineBuffer}" |
+        sed -e "s/^.*${Key}\([0-9a-f][0-9a-f]*\).*$/\1/"
+        )
+
+    Flags="0x${Flags}"
+
+    #---------------------------------------------------------------------------
+    # Comprehend the flags.
+    #---------------------------------------------------------------------------
+
+    local FlagsDescription="${Flags}"
+
+    if [[ "${DecodeFlags}" == 'true' ]]
+    then
+
+        i=0
+        while (( i < ( ${#SystemUIVisibilityFlagMap[@]} / 2 ) ))
+        do
+
+            #-------------------------------------------------------------------
+            # Extract the current flag name and value.
+            #-------------------------------------------------------------------
+
+            local Name="${SystemUIVisibilityFlagMap[((2 * i + 0))]}"
+            local Value="${SystemUIVisibilityFlagMap[((2 * i + 1))]}"
+
+            #-------------------------------------------------------------------
+            # Check if this flag is set.
+            #-------------------------------------------------------------------
+
+            if ((Flags & Value))
+            then
+                FlagsDescription+=$'\n'"${Indentation}${Name}"
+            fi
+
+            #-------------------------------------------------------------------
+            # Prepare for the next iteration.
+            #-------------------------------------------------------------------
+
+            i=$((i + 1))
+
+        done
+
+    fi
+
+    #---------------------------------------------------------------------------
+    # Return the result.
+    #---------------------------------------------------------------------------
+
+    echo "${FlagsDescription}"
+
+    #---------------------------------------------------------------------------
+    # Return success.
+    #---------------------------------------------------------------------------
+
+    return 0
+
+    }
+
+#===============================================================================
+
+#-------------------------------------------------------------------------------
+# Have a look around.
+#-------------------------------------------------------------------------------
+
+ExamineTheCommandLine $@
+
+#-------------------------------------------------------------------------------
+# Parse the input.
+#-------------------------------------------------------------------------------
+
+Parse
