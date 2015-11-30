@@ -1,6 +1,6 @@
 # `android-dumpsys-filters`
 
-This repository contains scripts that filter the output from various Android `dumpsys` commands to make them more readable.
+Scripts that filter the output from some Android `dumpsys` commands to make them more readable.
 
 <br/>
 ## The Activity Manager
