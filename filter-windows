@@ -35,6 +35,50 @@ declare -r UIDMap=(
     'BLUETOOTH_UID' '1002'
     )
 
+# A map that associates window type numbers with their names.
+
+declare -r TypeMap=(
+    'TYPE_BASE_APPLICATION'             '1'
+    'TYPE_APPLICATION'                  '2'
+    'TYPE_APPLICATION_STARTING'         '3'
+    'TYPE_APPLICATION_PANEL'            '1000'
+    'TYPE_APPLICATION_MEDIA'            '1001'
+    'TYPE_APPLICATION_SUB_PANEL'        '1002'
+    'TYPE_APPLICATION_ATTACHED_DIALOG'  '1003'
+    'TYPE_APPLICATION_MEDIA_OVERLAY'    '1004'
+    'TYPE_STATUS_BAR'                   '2000'
+    'TYPE_SEARCH_BAR'                   '2001'
+    'TYPE_PHONE'                        '2002'
+    'TYPE_SYSTEM_ALERT'                 '2003'
+    'TYPE_KEYGUARD'                     '2004'
+    'TYPE_TOAST'                        '2005'
+    'TYPE_SYSTEM_OVERLAY'               '2006'
+    'TYPE_PRIORITY_PHONE'               '2007'
+    'TYPE_SYSTEM_DIALOG'                '2008'
+    'TYPE_KEYGUARD_DIALOG'              '2009'
+    'TYPE_SYSTEM_ERROR'                 '2010'
+    'TYPE_INPUT_METHOD'                 '2011'
+    'TYPE_INPUT_METHOD_DIALOG'          '2012'
+    'TYPE_WALLPAPER'                    '2013'
+    'TYPE_STATUS_BAR_PANEL'             '2014'
+    'TYPE_SECURE_SYSTEM_OVERLAY'        '2015'
+    'TYPE_DRAG'                         '2016'
+    'TYPE_STATUS_BAR_SUB_PANEL'         '2017'
+    'TYPE_POINTER'                      '2018'
+    'TYPE_NAVIGATION_BAR'               '2019'
+    'TYPE_VOLUME_OVERLAY'               '2020'
+    'TYPE_BOOT_PROGRESS'                '2021'
+    'TYPE_HIDDEN_NAV_CONSUMER'          '2022'
+    'TYPE_DREAM'                        '2023'
+    'TYPE_NAVIGATION_BAR_PANEL'         '2024'
+    'TYPE_UNIVERSE_BACKGROUND'          '2025'
+    'TYPE_DISPLAY_OVERLAY'              '2026'
+    'TYPE_MAGNIFICATION_OVERLAY'        '2027'
+    'TYPE_RECENTS_OVERLAY'              '2028'
+    'TYPE_KEYGUARD_SCRIM'               '2029'
+    'TYPE_PRIVATE_PRESENTATION'         '2030'
+    )
+
 # A map that associates layout flags with their names.
 
 declare -r LayoutFlagMap=(
@@ -463,6 +507,11 @@ Window()
             local Flags=$(ExtractLayoutFlags)
         fi
 
+        if [[ "${LineBuffer}" =~ ^.*' 'ty=.*$ ]]
+        then
+            local Type=$(ExtractType)
+        fi
+
         if [[ "${LineBuffer}" =~ ^.*' 'mBaseLayer=.*$ ]]
         then
             local BaseLayer=$(echo "${LineBuffer}" | sed -e 's/^.* mBaseLayer=\([0-9][0-9]*\).*$/\1/')
@@ -569,6 +618,7 @@ Window()
     echo "  Owner's UID         : ${OwnerUID}"
     echo "  Package             : ${Package}"
     echo "  App Operation       : ${AppOperation}"
+    echo "  Type                : ${Type}"
     echo "  Base Layer          : ${BaseLayer}"
 
     if [[ -n "${Activity}" ]]
@@ -610,7 +660,7 @@ ExtractOwnerUID()
     fi
 
     #---------------------------------------------------------------------------
-    # Get the hexadecimal representation of the flags.
+    # Get the decimal representation of the user ID.
     #---------------------------------------------------------------------------
 
     local UserID=$(
@@ -657,6 +707,77 @@ ExtractOwnerUID()
     #---------------------------------------------------------------------------
 
     echo "${UserID}${UIDName}"
+
+    #---------------------------------------------------------------------------
+    # Return success.
+    #---------------------------------------------------------------------------
+
+    return 0
+
+    }
+
+#===============================================================================
+
+ExtractType()
+    {
+
+    #---------------------------------------------------------------------------
+    # Check if the current line appears to contain a window type.
+    #---------------------------------------------------------------------------
+
+    if ! [[ "${LineBuffer}" =~ ^.*" ty=" ]]
+    then
+        return 1
+    fi
+
+    #---------------------------------------------------------------------------
+    # Get the decimal representation of the type.
+    #---------------------------------------------------------------------------
+
+    local Type=$(
+        echo "${LineBuffer}" |
+        sed -e 's/^.* ty=\([0-9][0-9]*\).*$/\1/'
+        )
+
+    #---------------------------------------------------------------------------
+    # Check if this is a distinguished UID.
+    #---------------------------------------------------------------------------
+
+    local TypeName=''
+
+    i=0
+    while (( i < ( ${#TypeMap[@]} / 2 ) ))
+    do
+
+        #-----------------------------------------------------------------------
+        # Extract the current type name and value.
+        #-----------------------------------------------------------------------
+
+        local Name="${TypeMap[((2 * i + 0))]}"
+        local Value="${TypeMap[((2 * i + 1))]}"
+
+        #-----------------------------------------------------------------------
+        # Check if this is a match.
+        #-----------------------------------------------------------------------
+
+        if ((Type == Value))
+        then
+            TypeName=" ${Name}"
+        fi
+
+        #-----------------------------------------------------------------------
+        # Prepare for the next iteration.
+        #-----------------------------------------------------------------------
+
+        i=$((i + 1))
+
+    done
+
+    #---------------------------------------------------------------------------
+    # Return the result.
+    #---------------------------------------------------------------------------
+
+    echo "${Type}${TypeName}"
 
     #---------------------------------------------------------------------------
     # Return success.
