@@ -230,7 +230,10 @@ ActivityStack()
     # Consume this line.
     #---------------------------------------------------------------------------
 
-    GetTheNextLine
+    while ! Task
+    do
+        GetTheNextLine
+    done
 
     #---------------------------------------------------------------------------
     # Loop over tasks within this activity stack.
@@ -305,7 +308,10 @@ Task()
     # Consume this line.
     #---------------------------------------------------------------------------
 
-    GetTheNextLine
+    while ! ExtractTaskRecord
+    do
+        GetTheNextLine
+    done
 
     #---------------------------------------------------------------------------
     # This line should contain a task record.
@@ -523,7 +529,7 @@ FocusedActivity()
 
     if ! [[ "${LineBuffer}" =~ ^"  mFocusedActivity:" ]]
     then
-        ThrowYourHandsInTheAir 'Malformed focused activity'
+        return 1
     fi
 
     #---------------------------------------------------------------------------
@@ -558,35 +564,57 @@ FocusedActivityStack()
 
     if ! [[ "${LineBuffer}" =~ ^"  mFocusedStack=" ]]
     then
-
-        #-----------------------------------------------------------------------
-        # If control arrives here, this is *not* information about the activity
-        # stack that has focus.
-        #-----------------------------------------------------------------------
-
-        ThrowYourHandsInTheAir 'Malformed focused activity stack'
-
+        return 1
     fi
+
+    local mFocusedStack=$(
+        echo "${LineBuffer}" |
+        sed -e 's/^.*\(mFocusedStack=ActivityStack{[^{}]*}\).*$/\1/'
+        ) 
 
     #---------------------------------------------------------------------------
     # Extract information about this activity stack.
     #---------------------------------------------------------------------------
 
     local HashCode=$(
-        echo "${LineBuffer}" |
+        echo "${mFocusedStack}" |
         sed -e 's/^.*ActivityStack[^ ]\([^ ][^ ]*\) .*$/\1/'
         )
 
     local StackID=$(
-        echo "${LineBuffer}" |
-        sed -e 's/^.*ActivityStack[^ ][^ ]* stackId=\([^ ][^ ]*\), .*$/\1/'
+        echo "${mFocusedStack}" |
+        sed -e 's/^.*ActivityStack[^ ][^ ]* stackId=\([^ ][^ ,]*\)[, ].*$/\1/'
         )
 
     #---------------------------------------------------------------------------
     # Announce this activity.
     #---------------------------------------------------------------------------
 
-    echo "  Activity Stack with Focus: #${StackID}"
+    echo "  Activity Stack with Focus: #${StackID} (${HashCode})"
+    local mLastFocusedStack=$(
+        echo "${LineBuffer}" |
+        sed -e 's/^.*\(mLastFocusedStack=ActivityStack{[^{}]*}\).*$/\1/'
+        ) 
+
+    #---------------------------------------------------------------------------
+    # Extract information about this activity stack.
+    #---------------------------------------------------------------------------
+
+    local HashCode=$(
+        echo "${mLastFocusedStack}" |
+        sed -e 's/^.*ActivityStack[^ ]\([^ ][^ ]*\) .*$/\1/'
+        )
+
+    local StackID=$(
+        echo "${mLastFocusedStack}" |
+        sed -e 's/^.*ActivityStack[^ ][^ ]* stackId=\([^ ][^ ,]*\)[, ].*$/\1/'
+        )
+
+    #---------------------------------------------------------------------------
+    # Announce this activity.
+    #---------------------------------------------------------------------------
+
+    echo "  Last Activity Stack with Focus: #${StackID} (${HashCode})"
 
     #---------------------------------------------------------------------------
     # Consume this line.
