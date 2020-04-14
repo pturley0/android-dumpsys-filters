@@ -166,8 +166,8 @@ declare -r SystemUIVisibilityFlagMap=(
 
 DecodeFlags='false'
 
-# Try to understand which windows are visible and, they definitely aren't, omit
-# them from the output.
+# Try to understand which windows are visible and, if they definitely aren't,
+# omit them from the output.
 #
 # Our understanding of window visibility is imperfect, so we can only guarantee
 # that omitted windows are definitely not visible. Some of the windows that make
