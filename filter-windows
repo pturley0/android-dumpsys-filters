@@ -1,5 +1,5 @@
 #===============================================================================
-# This bash script post-processes an Window Manager "dump" to make it more
+# This bash script post-processes a Window Manager "dump" to make it more
 # readable:
 #
 #       adb shell dumpsys window w | filter-windows
